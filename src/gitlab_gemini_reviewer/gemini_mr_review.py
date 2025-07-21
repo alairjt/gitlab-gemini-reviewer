@@ -660,9 +660,8 @@ def main():
             language=language
         )
 
-        success = orchestrator.run_review()
-        sys.exit(0 if success else 1)
-
+        orchestrator.run_review()
+        sys.exit(0)
     except (ValueError, requests.RequestException, ConnectionError) as e:
         print(f"❌ Configuration or API error: {e}", file=sys.stderr)
         sys.exit(1)

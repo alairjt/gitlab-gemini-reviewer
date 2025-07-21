@@ -621,6 +621,8 @@ def main():
         elif language == "pt-br":
             language = "pt-BR"
 
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
         config = {
             "gitlab_token": os.getenv("GITLAB_TOKEN"),
             "gemini_api_key": os.getenv("GEMINI_API_KEY"),
@@ -645,7 +647,7 @@ def main():
             gitlab_token=config["gitlab_token"],
             gitlab_url=config["gitlab_url"]
         )
-        gemini_service = GeminiService(api_key=config["gemini_api_key"], language=language)
+        gemini_service = GeminiService(api_key=config["gemini_api_key"], language=language, model_name=gemini_model)
         
         orchestrator = ReviewOrchestrator(
             gitlab_service=gitlab_service,

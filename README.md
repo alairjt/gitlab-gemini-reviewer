@@ -33,7 +33,7 @@ You can install the package directly from the source code.
 
 ```bash
 # Clone the repository first
-git clone <your-repo-url>
+git clone https://github.com/alairjt/gitlab-gemini-reviewer.git
 cd gitlab-gemini-reviewer
 
 # Install using pip
@@ -44,30 +44,39 @@ pip install .
 
 The tool is configured entirely through environment variables.
 
-| Variable                 | Description                                                              | Required |
-| ------------------------ | ------------------------------------------------------------------------ | :------: |
-| `GITLAB_TOKEN`           | Your GitLab personal access token with `api` scope.                      |   Yes    |
-| `GEMINI_API_KEY`         | Your Google AI Studio API key for Gemini.                                |   Yes    |
-| `CI_PROJECT_ID`          | The ID of your GitLab project. Provided by GitLab CI.                    |   Yes    |
-| `CI_MERGE_REQUEST_IID`   | The IID (internal ID) of the merge request. Provided by GitLab CI.       |   Yes    |
-| `CI_SERVER_URL`          | The base URL of your GitLab instance (e.g., `https://gitlab.com`).        |   Yes    |
-| `JIRA_URL`               | The base URL of your Jira instance.                                      |    No    |
-| `JIRA_USER`              | The email or username for the Jira service account.                      |    No    |
-| `JIRA_TOKEN`             | The API token for the Jira service account.                              |    No    |
-| `REVIEW_LANGUAGE`        | The language for the AI's response. `en` or `pt-BR`. Defaults to `pt-BR`. |    No    |
-| `DEBUG`                  | Set to `1` or `true` for verbose error logging.                          |    No    |
+| Variable                 | Description                                                              | Default                  | Required |
+| ------------------------ | ------------------------------------------------------------------------ | ------------------------ | :------: |
+| `GITLAB_TOKEN`           | Your GitLab personal access token with `api` scope.                      | -                        |   Yes    |
+| `GEMINI_API_KEY`         | Your Google AI Studio API key for Gemini.                                | -                        |   Yes    |
+| `CI_PROJECT_ID`          | The ID of your GitLab project. Provided by GitLab CI.                    | -                        |   Yes    |
+| `CI_MERGE_REQUEST_IID`   | The IID (internal ID) of the merge request. Provided by GitLab CI.       | -                        |   Yes    |
+| `CI_SERVER_URL`          | The base URL of your GitLab instance (e.g., `https://gitlab.com`).        | -                        |   Yes    |
+| `JIRA_URL`               | The base URL of your Jira instance.                                      | -                        |    No    |
+| `JIRA_USER`              | The email or username for the Jira service account.                      | -                        |    No    |
+| `JIRA_TOKEN`             | The API token for the Jira service account.                              | -                        |    No    |
+| `REVIEW_LANGUAGE`        | The language for the AI's response (`en` or `pt-BR`).                    | `pt-BR`                  |    No    |
+| `GEMINI_MODEL`           | The Gemini model to use for the review.                                  | `gemini-1.5-flash`       |    No    |
+| `DEBUG`                  | Set to `1` or `true` for verbose error logging.                          | -                        |    No    |
 
 **Note**: The Jira variables are only required if you want to enable Jira integration.
 
 ## ▶️ Usage
 
-After installation, the tool can be run from the command line:
+After installation, the tool can be run from the command line.
 
 ```bash
 gemini-reviewer
 ```
 
-It's intended to be used as a step in your CI/CD pipeline. Here is an example of a GitLab CI job:
+If you encounter a `command not found` error, it means the installation directory is not in your shell's `PATH`. You can either add it or run the tool as a module:
+
+```bash
+python -m gitlab_gemini_reviewer.gemini_mr_review
+```
+
+### GitLab CI/CD Example
+
+It's intended to be used as a step in your CI/CD pipeline.
 
 ```yaml
 # .gitlab-ci.yml
@@ -92,12 +101,4 @@ review_job:
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
-
-## 📦 Publish
-
-```bash
-python -m pip install --upgrade build twine
-python -m build
-python -m twine upload dist/*
-```
+This project is licensed under the MIT License.

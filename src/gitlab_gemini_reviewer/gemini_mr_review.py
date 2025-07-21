@@ -435,7 +435,10 @@ class ReviewOrchestrator:
         self._write_json_report(result, mr_info)
         
         if self.jira_integration:
+            print("🚀 Integrating with Jira...")
             self._handle_jira_integration(mr_info, result, split_changes)
+        else:
+            print("❌ Jira integration is disabled.")
 
         return result.approved
 
@@ -596,6 +599,7 @@ class ReviewOrchestrator:
             "approved": result.approved,
             "score": result.score,
             "issues_count": len(result.issues),
+            "issues": result.issues,  # Include the full list of issues
             "mr": {
                 "title": mr_info.get("title"),
                 "author": mr_info.get("author", {}).get("name")

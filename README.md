@@ -81,22 +81,20 @@ It's intended to be used as a step in your CI/CD pipeline.
 ```yaml
 # .gitlab-ci.yml
 
-review_job:
-  stage: test
+gitlab_gemini_reviewer:
+  stage: review
   image: python:3.11-slim
+  cache:
+    paths:
+      - .cache/pip/
   before_script:
-    - pip install gitlab-gemini-reviewer # Or install from your private registry
+    - pip install --upgrade pip
+    - pip install gitlab-gemini-reviewer==0.1.4
   script:
     - gemini-reviewer
-  variables:
-    # It's highly recommended to store these as protected CI/CD variables in GitLab
-    GITLAB_TOKEN: $GITLAB_TOKEN
-    GEMINI_API_KEY: $GEMINI_API_KEY
-    JIRA_URL: $JIRA_URL
-    JIRA_USER: $JIRA_USER
-    JIRA_TOKEN: $JIRA_TOKEN
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
 ```
 
 ## 📄 License

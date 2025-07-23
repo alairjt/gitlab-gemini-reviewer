@@ -5,6 +5,10 @@ An automated code review assistant powered by Google's Gemini AI. This tool anal
 ## ✨ Features
 
 - **Automated Code Analysis**: Leverages the Gemini API to perform detailed code reviews.
+- **Smart MR Discussions**: 
+  - Tracks existing discussions to avoid duplicates
+  - Automatically resolves discussions when issues are fixed
+  - Filters discussions by severity before creating new ones
 - **Inline MR Commenting**: Posts suggestions and issues as discussions directly on the relevant code lines in the merge request.
 - **Overall Summary**: Adds a general summary comment to the MR with a quality score.
 - **Automatic Approval**: Can automatically approve merge requests that meet a configurable quality threshold.
@@ -18,12 +22,15 @@ An automated code review assistant powered by Google's Gemini AI. This tool anal
 
 1.  **Trigger**: The tool is designed to be run in a CI/CD pipeline when a merge request is created or updated.
 2.  **Fetch Diffs**: It fetches the code changes (diffs) from the specified GitLab merge request.
-3.  **Analyze**: It sends the code, along with contextual information from the MR title and description, to the Gemini API for analysis.
-4.  **Post Feedback**: It parses the AI's response and posts feedback to GitLab:
+3.  **Check Existing Discussions**: 
+    - Fetches all existing discussions to avoid duplicates
+    - Resolves discussions for issues that have been fixed
+4.  **Analyze**: It sends the code, along with contextual information from the MR title and description, to the Gemini API for analysis.
+5.  **Post Feedback**: It parses the AI's response and posts feedback to GitLab:
     - A general summary note.
-    - Discussions attached to specific lines of code for each identified issue.
-5.  **Integrate with Jira**:
-    - It extracts the Jira ticket key from the MR title (e.g., `PROJ-123`).
+    - Discussions attached to specific lines of code for each new issue found.
+6.  **Integrate with Jira**:
+    - Extracts the Jira ticket key from the MR title (e.g., `PROJ-123`).
     - Creates a "Code Review" sub-task.
     - Generates a complete QA test plan and posts it as a comment on the main Jira ticket.
 
@@ -84,18 +91,41 @@ It's intended to be used as a step in your CI/CD pipeline.
 gitlab_gemini_reviewer:
   stage: review
   image: python:3.11-slim
-  cache:
-    paths:
-      - .cache/pip/
   before_script:
     - pip install --upgrade pip
     - pip install gitlab-gemini-reviewer==0.1.4
   script:
     - gemini-reviewer
+  needs: ['unit test'] # ✅ Ensures that the 'unit test' stage runs before.
   rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    # Main rule:
+    # 1. Run only on Merge Request events.
+    # 2. Do NOT run if the target branch is 'production' or 'pre-production'.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != "production" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != "pre-production"'
+      when: on_success # Runs if the job in 'needs' succeeds (default).
+  interruptible: true # ✅ Cancels the old job if a new commit is pushed to the MR, saving resources.
+
 
 ```
+
+## 🔄 Discussion Management
+
+The tool now includes intelligent discussion management features:
+
+### Avoiding Duplicate Discussions
+- Automatically checks for existing discussions on the same lines of code
+- Prevents creating duplicate discussions for the same issue
+- Uses file path and line number to identify duplicate issues
+
+### Automatic Resolution
+- Tracks when issues are fixed in subsequent commits
+- Automatically resolves discussions when the corresponding issues are no longer present
+- Only creates new discussions for issues that don't already have open discussions
+
+### Severity Filtering
+- Filters issues by severity before creating discussions
+- Helps focus on the most important feedback first
+- Configurable through the API response
 
 ## 📄 License
 

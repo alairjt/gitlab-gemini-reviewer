@@ -26,7 +26,7 @@ import time
 import traceback
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set, Tuple
 
 import requests
 from google import generativeai as genai
@@ -76,8 +76,96 @@ class GitLabService:
         except requests.RequestException as e:
             print(f"❌ Failed to post MR note: {e}")
 
+    def _extract_position_from_note(self, note: Dict) -> Optional[Tuple[str, int]]:
+        """Extracts file path and line number from a note's position data."""
+        position = note.get('position', {})
+        if not position:
+            return None
+            
+        # Get file path (can be in new_path or old_path)
+        file_path = position.get('new_path') or position.get('old_path')
+        if not file_path:
+            return None
+            
+        # Get line number (can be in new_line or old_line)
+        line_number = position.get('new_line') or position.get('old_line')
+        if not line_number:
+            return None
+            
+        return (file_path, line_number)
+
+    def check_and_resolve_discussions(self, current_issues: List[Dict[str, Any]]) -> None:
+        """Check existing discussions and resolve those that are no longer relevant."""
+        existing_discussions = self.get_mr_discussions()
+        if not existing_discussions:
+            return
+            
+        # Create a set of (file_path, line_number) for current issues
+        current_issue_positions = set()
+        for issue in current_issues:
+            file_path, line = issue.get('file'), issue.get('line_number')
+            if file_path and isinstance(line, int) and line > 0:
+                current_issue_positions.add((file_path, line))
+        
+        # Check each discussion
+        for discussion in existing_discussions:
+            try:
+                # Skip if not a discussion with notes or if it's already resolved
+                if not discussion.get('notes') or discussion.get('resolvable') is False:
+                    continue
+                    
+                # Get the first note that has position information
+                for note in discussion['notes']:
+                    position = self._extract_position_from_note(note)
+                    if not position:
+                        continue
+                        
+                    file_path, line_number = position
+
+                    # If this issue is no longer in current issues, mark as resolved
+                    if (file_path, line_number) not in current_issue_positions and not note.get('resolved'):
+                        print(f"ℹ️ Issue at {file_path}:{line_number} appears to be fixed. Resolving discussion...")
+                        self.resolve_discussion(discussion['id'], resolved=True)
+                    
+                    # Once we've processed a positioned note, move to the next discussion
+                    break
+                    
+            except (AttributeError, KeyError) as e:
+                print(f"⚠️ Error processing discussion for resolution check: {e}")
+                continue
+
+    def _get_existing_discussion_positions(self) -> Set[Tuple[str, int]]:
+        """Get a set of (file_path, line_number) for all existing discussions."""
+        existing_discussions = self.get_mr_discussions()
+        existing_positions = set()
+        
+        for discussion in existing_discussions:
+            try:
+                # Skip if not a discussion with notes
+                if not discussion.get('notes'):
+                    continue
+                    
+                # Get the first note that has position information
+                for note in discussion['notes']:
+                    position = self._extract_position_from_note(note)
+                    if position:
+                        existing_positions.add(position)
+                        break  # Only need one position per discussion
+                        
+            except (AttributeError, KeyError) as e:
+                print(f"⚠️ Error processing existing discussion: {e}")
+                continue
+                
+        return existing_positions
+
     def create_mr_discussions(self, issues: List[Dict[str, Any]], line_map: Dict, mr_details: Dict) -> None:
-        """Creates discussions on the MR for each issue found."""
+        """Creates discussions on the MR for each issue found, avoiding duplicates."""
+        # First, check and resolve any discussions that are no longer relevant
+        self.check_and_resolve_discussions(issues)
+        
+        # Get existing discussion positions to avoid duplicates
+        existing_positions = self._get_existing_discussion_positions()
+        
         if not issues:
             print("ℹ️ No issues to report.")
             return
@@ -85,8 +173,28 @@ class GitLabService:
         url = f"{self.gitlab_url}/api/v4/projects/{self.project_id}/merge_requests/{self.mr_iid}/discussions"
         successful, ignored, failed = 0, 0, 0
 
-        for idx, issue in enumerate(issues, 1):
-            print(f"⏳ Analyzing issue {idx}/{len(issues)}...")
+        # Filter out issues that already have discussions
+        filtered_issues = []
+        for issue in issues:
+            file_path, new_line = issue.get("file"), issue.get("line_number")
+            if not (file_path and isinstance(new_line, int) and new_line > 0):
+                continue
+                
+            # Check if there's already a discussion for this position
+            if (file_path, new_line) in existing_positions:
+                print(f"ℹ️ Skipping duplicate issue at {file_path}:{new_line} - discussion already exists")
+                continue
+                
+            filtered_issues.append(issue)
+        
+        if not filtered_issues:
+            print("ℹ️ No new issues to report after filtering duplicates.")
+            return
+            
+        print(f"ℹ️ Found {len(filtered_issues)} new issues to report (after filtering duplicates).")
+        
+        for idx, issue in enumerate(filtered_issues, 1):
+            print(f"⏳ Processing issue {idx}/{len(filtered_issues)}...")
             file_path, new_line = issue.get("file"), issue.get("line_number")
             if not (file_path and isinstance(new_line, int) and new_line > 0):
                 ignored += 1
@@ -121,6 +229,29 @@ class GitLabService:
             print("✅ MR approved successfully.")
         except requests.RequestException as e:
             print(f"⚠️ Failed to approve MR: {e}")
+            
+    def merge_mr(self) -> bool:
+        """Merges the merge request."""
+        url = f"{self.gitlab_url}/api/v4/projects/{self.project_id}/merge_requests/{self.mr_iid}/merge"
+        try:
+            # First approve the MR if not already approved
+            self.approve_mr()
+            
+            # Then merge the MR
+            response = requests.put(
+                url,
+                headers=self.headers,
+                params={"merge_when_pipeline_succeeds": True},
+                timeout=30
+            )
+            response.raise_for_status()
+            print("✅ MR merged successfully.")
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to merge MR: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
+            return False
 
     def _get_file_diff_position(self, file_path: str, old_line: int, new_line: int, base_sha: str, head_sha: str, start_sha: str) -> Optional[Dict]:
         """Builds the position object for a single-line diff comment."""
@@ -132,10 +263,42 @@ class GitLabService:
             position['old_line'] = old_line
         return position
 
+    def get_mr_discussions(self) -> List[Dict]:
+        """Fetches all discussions for the merge request."""
+        url = f"{self.gitlab_url}/api/v4/projects/{self.project_id}/merge_requests/{self.mr_iid}/discussions"
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to fetch MR discussions: {e}")
+            return []
+            
+    def resolve_discussion(self, discussion_id: str, resolved: bool = True) -> bool:
+        """Marks a discussion as resolved or unresolved."""
+        url = f"{self.gitlab_url}/api/v4/projects/{self.project_id}/merge_requests/{self.mr_iid}/discussions/{discussion_id}"
+        data = {"resolved": resolved}
+        try:
+            response = requests.put(url, headers=self.headers, json=data, timeout=30)
+            if response.status_code == 200:
+                status = "resolved" if resolved else "unresolved"
+                print(f"✅ Successfully marked discussion {discussion_id} as {status}")
+                return True
+            else:
+                print(f"⚠️ Failed to mark discussion {discussion_id} as {'resolved' if resolved else 'unresolved'}: {response.text}")
+                return False
+        except requests.RequestException as e:
+            print(f"⚠️ Error marking discussion {discussion_id} as {'resolved' if resolved else 'unresolved'}: {e}")
+            return False
+
     def _create_discussion_with_retry(self, url: str, data: Dict, max_retries: int = 3) -> bool:
         """Creates a discussion with exponential backoff retry logic."""
         last_error = None
         for attempt in range(max_retries):
+            if attempt > 0:
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                print(f"  ⏳ Retry attempt {attempt + 1}/{max_retries}, waiting {wait_time:.1f}s...")
+                time.sleep(wait_time)
             try:
                 response = requests.post(url, headers=self.headers, json=data, timeout=(10, 30))
                 if response.status_code == 201:
@@ -331,39 +494,79 @@ class JiraIntegration:
         except JIRAError as e:
             raise ConnectionError(f"Failed to connect to Jira. Status: {e.status_code}, Text: {e.text}") from e
 
-    def create_review_subtask(self, parent_key: str, summary: str, score: int, mr_url: str, language: str = "en") -> Optional[str]:
-        """Creates a sub-task under a parent issue in Jira."""
+    def _format_issue_details(self, issue: Dict[str, str]) -> str:
+        """Format a single issue's details for the description."""
+        details = []
+        if 'severity' in issue:
+            details.append(f"*Severity*: {issue['severity'].title()}")
+        if 'file' in issue:
+            details.append(f"*File*: {issue['file']}")
+        if 'line' in issue:
+            details.append(f"*Line*: {issue['line']}")
+        if 'suggestion' in issue:
+            details.append(f"*Suggestion*: {issue['suggestion']}")
+        return "\n".join(details)
+
+    def create_review_subtask(self, parent_key: str, summary: str, issues: List[Dict], description: str, score: int, mr_url: str, 
+                            language: str = "en") -> Optional[str]:
+        """Creates a sub-task or task in Jira.
+        
+        Args:
+            parent_key: The key of the parent issue
+            summary: Summary/title of the new issue
+            issues: List of issues found in the code
+            description: Detailed description of the review
+            score: Review score (0-100)
+            mr_url: URL of the merge request
+            language: Language for the issue content
+        """
         try:
             parent_issue = self.client.issue(parent_key)
-            subtask_type = next((t for t in self.client.issue_types() if t.name == "Sub-task"), None)
-            if not subtask_type:
+            issue_type = next((t for t in self.client.issue_types() if t.subtask), None)
+            if not issue_type:
                 print("❌ Could not find 'Sub-task' issue type in this Jira project.")
                 return None
 
-            title = "Revisão de Código Automatizada por Gemini AI" if language == "pt-BR" else "Automated Code Review by Gemini AI"
-            description = (
-                f"Revisão de código automatizada pelo Gemini AI foi concluída.\n\n"
-                f"*Pontuação da Revisão:* {score}/100\n\n"
-                f"*Resumo:*\n{{code:java}}\n{summary or 'Nenhum resumo fornecido.'}\n{{code}}\n\n"
-                f"Link para o Merge Request: {mr_url}"
-            ) if language == "pt-BR" else (
-                f"Automated code review by Gemini AI has been completed.\n\n"
-                f"*Review Score:* {score}/100\n\n"
-                f"*Summary:*\n{{code:java}}\n{summary or 'No summary provided.'}\n{{code}}\n\n"
-                f"Link to Merge Request: {mr_url}"
-            )
+            # Build detailed description
+            description_parts = [
+                description,
+                f"\n*Review Score*: {score}/100\n",
+                f"*Merge Request*: {mr_url}\n"
+            ]
 
-            subtask_fields = {
+            # Add issues section if there are any
+            if issues:
+                description_parts.append("\n*Issues Found* ({}):\n".format(len(issues)))
+                for i, issue in enumerate(issues, 1):
+                    description_parts.extend([
+                        f"\n---\n",
+                        f"*Issue #{i}:* {issue.get('title', 'No title')}\n",
+                        f"{self._format_issue_details(issue)}\n"
+                    ])
+            else:
+                description_parts.append("\n*No issues found in the code review.*\n")
+
+            full_description = "\n".join(description_parts)
+           
+            # Prepare fields for the issue
+            fields = {
                 "project": {"key": parent_issue.fields.project.key},
-                "summary": title,
-                "description": description,
-                "issuetype": {"id": subtask_type.id},
-                "parent": {"key": parent_issue.key},
+                "summary": summary,
+                "description": full_description,
+                "issuetype": {"id": issue_type.id},
+                "parent": {"key": parent_key}
             }
 
-            new_subtask = self.client.create_issue(fields=subtask_fields)
-            print(f"✅ Successfully created Jira sub-task: {new_subtask.key}")
-            return new_subtask.key
+            try:
+                # Create the issue
+                new_issue = self.client.create_issue(fields=fields)
+                print(f"✅ Successfully created Jira sub-task: {new_issue.key}")
+                return new_issue.key
+            except JIRAError as e:
+                print(f"❌ Failed to create Jira issue: {e.response.text}")
+                if e.status_code == 400 and "issuetype" in str(e.response.text.lower()):
+                    print("  - The issue type might not be available for this project.")
+                return None
 
         except JIRAError as e:
             print(f"❌ An error occurred with Jira: {e.text}")
@@ -391,6 +594,7 @@ class ReviewOrchestrator:
         self.gemini_service = gemini_service
         self.jira_config = jira_config
         self.language = language
+        self.ignore_severity = set(jira_config.get('ignore_severity', set())) if jira_config else set()
         self.jira_integration: Optional[JiraIntegration] = None
         if all(self.jira_config.get(k) for k in ['url', 'user', 'token']):
             try:
@@ -407,6 +611,13 @@ class ReviewOrchestrator:
         """Runs the entire automated review and integration process."""
         print("🚀 Starting automated review process...")
         mr_info = self.gitlab_service.get_mr_info()
+        
+        # Skip if MR is a draft
+        mr_title = mr_info.get('title', '').lower()
+        if 'draft' in mr_title or 'wip' in mr_title or 'draft:' in mr_title or 'wip:' in mr_title:
+            print("⏭️  MR is marked as draft/WIP. Skipping review.")
+            return False
+            
         changes = self.gitlab_service.get_mr_changes()
         
         if not changes:
@@ -417,18 +628,22 @@ class ReviewOrchestrator:
         result = self._analyze_changes(split_changes, mr_info)
 
         self.gitlab_service.create_mr_note(self._format_review_comment(result))
-        
-        if result.issues:
+
+        filtered_issues = self._filter_issues_by_severity(result.issues)
+        if filtered_issues:
             mr_details = self._get_mr_details(mr_info)
             if mr_details:
                 line_map = self._build_line_map_from_changes(split_changes)
-                self.gitlab_service.create_mr_discussions(result.issues, line_map, mr_details)
+                self.gitlab_service.create_mr_discussions(filtered_issues, line_map, mr_details)
             else:
                 print("❌ Cannot create discussions without MR details.")
 
         if result.approved:
             print(f"👍 MR approved automatically (Score: {result.score})")
             self.gitlab_service.approve_mr()
+            # Try to auto-merge the MR
+            if not self.gitlab_service.merge_mr():
+                print("⚠️ Auto-merge failed. Please merge manually.")
         else:
             print(f"👎 MR requires attention (Score: {result.score})")
 
@@ -461,30 +676,68 @@ class ReviewOrchestrator:
         
         return ReviewResult(approved=approved, summary=summary, issues=issues, score=avg_score)
 
+    def _filter_issues_by_severity(self, issues: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Filter issues based on the ignore_severity configuration."""
+        if not self.ignore_severity:
+            return issues
+            
+        filtered_issues = []
+        for issue in issues:
+            severity = issue.get('severity', '').lower()
+            if severity not in self.ignore_severity:
+                filtered_issues.append(issue)
+            else:
+                print(f"ℹ️ Ignoring issue with severity '{severity}': {issue.get('description', 'No description')}")
+        
+        return filtered_issues
+
     def _handle_jira_integration(self, mr_info: Dict, review_result: ReviewResult, changes: List) -> None:
         """Handles the entire Jira integration process."""
         jira_key = self._extract_jira_key(mr_info.get("title", "") or mr_info.get("description", ""))
-        if not jira_key:
-            print("ℹ️ No Jira issue key found in MR title or description. Skipping Jira integration.")
+        if not jira_key or not self.jira_integration:
+            print("ℹ️ No Jira issue key found or Jira integration not configured. Skipping Jira integration.")
             return
 
         try:
-            # 1. Create the review sub-task
+            # Get the Jira issue to check if it's a subtask
+            issue = self.jira_integration.client.issue(jira_key)
+            is_subtask = hasattr(issue.fields, 'issuetype') and issue.fields.issuetype.subtask
+
+            # Determine the target issue key (parent if current is a subtask, otherwise use current)
+            target_key = str(issue.fields.parent.key) if is_subtask else jira_key
+            
+            # 1. Create the review task/subtask
+            if is_subtask:
+                print(f"ℹ️ {jira_key} is a subtask. Creating task in parent issue {target_key}")
+                summary = f"Code Review for {jira_key}"
+            else:
+                print(f"ℹ️ Creating subtask for {jira_key}")
+                summary = "Code Review"
+                
             self.jira_integration.create_review_subtask(
-                parent_key=jira_key,
-                summary=review_result.summary,
+                parent_key=target_key,
+                summary=summary,
+                description=review_result.summary,
+                issues=review_result.issues,
                 score=review_result.score,
                 mr_url=mr_info.get('web_url', ''),
                 language=self.language
             )
 
-            # 2. Generate and post the QA test plan
-            changes_diff = "\n".join([hunk.get("diff", "") for file_changes in changes for hunk in file_changes])
-            test_plan = self.gemini_service.generate_test_plan(mr_info, changes_diff, jira_key)
-            if test_plan:
-                self.jira_integration.add_comment_to_issue(jira_key, test_plan)
-            else:
-                print("⚠️ Could not generate test plan, so no comment will be added to Jira.")
+            # 2. Filter issues by severity before generating test plan
+            filtered_issues = self._filter_issues_by_severity(review_result.issues)
+            if filtered_issues != review_result.issues:
+                print(f"ℹ️ Filtered {len(review_result.issues) - len(filtered_issues)} issues based on severity filter")
+                review_result.issues = filtered_issues
+
+            # 3. Generate and post the QA test plan (only if there are issues after filtering)
+            if filtered_issues:
+                changes_diff = "\n".join([hunk.get("diff", "") for file_changes in changes for hunk in file_changes])
+                test_plan = self.gemini_service.generate_test_plan(mr_info, changes_diff, jira_key)
+                if test_plan:
+                    self.jira_integration.add_comment_to_issue(jira_key, test_plan)
+                else:
+                    print("⚠️ Could not generate test plan, so no comment will be added to Jira.")
 
         except Exception as e:
             print(f"⚠️ Failed during Jira integration process: {e}")
@@ -614,10 +867,28 @@ class ReviewOrchestrator:
 
 # --- Entry-Point ---
 
+def parse_ignore_severity(severity_str: Optional[str]) -> Set[str]:
+    """Parse the ignore_severity string into a set of severities to ignore."""
+    if not severity_str:
+        return set()
+    return set(s.strip().lower() for s in severity_str.split(','))
+
 def main():
     """Main function to run the reviewer."""
     try:
         print("🚀 Initializing merge request analysis...")
+        
+        # Parse command line arguments
+        import argparse
+        parser = argparse.ArgumentParser(description='GitLab Gemini Code Reviewer')
+        parser.add_argument('--ignore-severity', type=str, default='',
+                          help='Comma-separated list of severities to ignore (e.g., low,medium)')
+        args = parser.parse_args()
+        
+        # Parse ignore severities
+        ignore_severity = parse_ignore_severity(os.getenv("IGNORE_SEVERITY", args.ignore_severity))
+        if ignore_severity:
+            print(f"ℹ️ Ignoring issues with severity: {', '.join(ignore_severity)}")
         
         language = os.getenv("REVIEW_LANGUAGE", "pt-BR").lower()
         if language not in ["en", "pt-br"]:
@@ -637,7 +908,8 @@ def main():
                 "url": os.getenv("JIRA_URL"),
                 "user": os.getenv("JIRA_USER"),
                 "token": os.getenv("JIRA_TOKEN"),
-            }
+            },
+            "ignore_severity": ignore_severity
         }
 
         required_vars = ["gitlab_token", "gemini_api_key", "project_id", "mr_iid", "gitlab_url"]
@@ -645,21 +917,10 @@ def main():
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-        gitlab_service = GitLabService(
-            project_id=config["project_id"],
-            mr_iid=config["mr_iid"],
-            gitlab_token=config["gitlab_token"],
-            gitlab_url=config["gitlab_url"]
-        )
+        gitlab_service = GitLabService(project_id=config["project_id"], mr_iid=config["mr_iid"], gitlab_token=config["gitlab_token"], gitlab_url=config["gitlab_url"])
         gemini_service = GeminiService(api_key=config["gemini_api_key"], language=language, model_name=gemini_model)
-        
-        orchestrator = ReviewOrchestrator(
-            gitlab_service=gitlab_service,
-            gemini_service=gemini_service,
-            jira_config=config["jira_config"],
-            language=language
-        )
 
+        orchestrator = ReviewOrchestrator(gitlab_service=gitlab_service, gemini_service=gemini_service, jira_config=config["jira_config"], language=language)
         orchestrator.run_review()
         sys.exit(0)
     except (ValueError, requests.RequestException, ConnectionError) as e:

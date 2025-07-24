@@ -11,7 +11,8 @@ An automated code review assistant powered by Google's Gemini AI. This tool anal
   - Filters discussions by severity before creating new ones
 - **Inline MR Commenting**: Posts suggestions and issues as discussions directly on the relevant code lines in the merge request.
 - **Overall Summary**: Adds a general summary comment to the MR with a quality score.
-- **Automatic Approval**: Can automatically approve merge requests that meet a configurable quality threshold.
+- **Automatic Approval & Merge**: Can automatically approve and optionally merge requests that meet a configurable quality threshold.
+  - Control merging behavior with the `--auto-merge` flag or `AUTO_MERGE` environment variable
 - **Seamless Jira Integration**:
   - Creates a specific sub-task for the code review under the main story.
   - Generates and posts a detailed QA test plan as a comment on the parent ticket.
@@ -93,7 +94,7 @@ gitlab_gemini_reviewer:
   image: python:3.11-slim
   before_script:
     - pip install --upgrade pip
-    - pip install gitlab-gemini-reviewer==0.1.4
+    - pip install gitlab-gemini-reviewer>=0.3.0
   script:
     - gemini-reviewer
   needs: ['unit test'] # ✅ Ensures that the 'unit test' stage runs before.
@@ -126,6 +127,24 @@ The tool now includes intelligent discussion management features:
 - Filters issues by severity before creating discussions
 - Helps focus on the most important feedback first
 - Configurable through the API response
+
+## ⚙️ Auto-Merge Configuration
+
+You can enable automatic merging of approved MRs using either the command line flag or environment variable:
+
+```bash
+# Using command line flag
+gemini-reviewer --auto-merge
+
+# Using environment variable
+export AUTO_MERGE=true
+gemini-reviewer
+```
+
+### Important Notes:
+- The merge will only be attempted if the review is approved
+- The user running the tool must have merge permissions on the target repository
+- If the merge fails (e.g., due to merge conflicts), a warning will be logged
 
 ## 📄 License
 

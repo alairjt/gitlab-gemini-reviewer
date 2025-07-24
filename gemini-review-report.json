@@ -1,0 +1,27 @@
+{
+  "approved": true,
+  "score": 82,
+  "issues_count": 2,
+  "issues": [
+    {
+      "title": "Falta de testes para o validador cpf_cnpj_validator",
+      "file": "mercantil/trade_partner/drawee/bank_accounts/serializers.py",
+      "severity": "high",
+      "line_number": 11,
+      "description": "A adição de um novo validador requer testes unitários para garantir que ele funcione corretamente e para evitar regressões futuras.  A ausência de testes aumenta o risco de bugs em produção.",
+      "suggestion": "Adicionar testes unitários que verifiquem a validação de CPFs e CNPJs válidos e inválidos.  Exemplo:\n```python\nimport unittest\nfrom mercantil.commons.validators import cpf_cnpj_validator\n\nclass TestCPF_CNPJValidator(unittest.TestCase):\n    def test_valid_cpf(self):\n        self.assertTrue(cpf_cnpj_validator('123.456.789-00'))\n\n    def test_invalid_cpf(self):\n        self.assertFalse(cpf_cnpj_validator('123.456.789-01'))\n\n    def test_valid_cnpj(self):\n        self.assertTrue(cpf_cnpj_validator('12.345.678/0001-00'))\n\n    def test_invalid_cnpj(self):\n        self.assertFalse(cpf_cnpj_validator('12.345.678/0001-01'))\n\n```"
+    },
+    {
+      "title": "Falta de testes para a validação de CPF/CNPJ",
+      "file": "mercantil/trade_partner/drawee/bank_accounts/serializers.py",
+      "severity": "high",
+      "line_number": 39,
+      "description": "A adição do validador `cpf_cnpj_validator` introduz uma nova funcionalidade, mas não há testes unitários para garantir que a validação esteja funcionando corretamente. Isso aumenta o risco de bugs em produção.",
+      "suggestion": "Adicione testes unitários para o validador `cpf_cnpj_validator`.  Exemplo:\n```python\nfrom django.test import TestCase\nfrom .serializers import BankAccountsWriteSerializer\n\nclass BankAccountsWriteSerializerTest(TestCase):\n    def test_valid_cpf(self):\n        data = {\n            'bank_id': 1,\n            'active': True,\n            'branch': '0001',\n            'account': '1234567890',\n            'type': 'Conta Corrente',\n            'supplier_document_number': '12345678900'\n        }\n        serializer = BankAccountsWriteSerializer(data=data)\n        self.assertTrue(serializer.is_valid())\n\n    def test_valid_cnpj(self):\n        data = {\n            'bank_id': 1,\n            'active': True,\n            'branch': '0001',\n            'account': '1234567890',\n            'type': 'Conta Corrente',\n            'supplier_document_number': '12345678000123'\n        }\n        serializer = BankAccountsWriteSerializer(data=data)\n        self.assertTrue(serializer.is_valid())\n\n    def test_invalid_cpf(self):\n        data = {\n            'bank_id': 1,\n            'active': True,\n            'branch': '0001',\n            'account': '1234567890',\n            'type': 'Conta Corrente',\n            'supplier_document_number': '12345678901'\n        }\n        serializer = BankAccountsWriteSerializer(data=data)\n        self.assertFalse(serializer.is_valid())\n        self.assertIn('supplier_document_number', serializer.errors)\n\n    def test_invalid_cnpj(self):\n        data = {\n            'bank_id': 1,\n            'active': True,\n            'branch': '0001',\n            'account': '1234567890',\n            'type': 'Conta Corrente',\n            'supplier_document_number': '1234567800012'\n        }\n        serializer = BankAccountsWriteSerializer(data=data)\n        self.assertFalse(serializer.is_valid())\n        self.assertIn('supplier_document_number', serializer.errors)\n```"
+    }
+  ],
+  "mr": {
+    "title": "CAP-3153: update gitlab ci to run gemini reviewer after source branch pipeline",
+    "author": "t-psi.alair"
+  }
+}

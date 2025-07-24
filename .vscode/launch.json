@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Gemini MR Reviewer (Ignore Low Severity)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "gitlab_gemini_reviewer.gemini_mr_review",
+            "args": "${command:pickArgs}",
+            "envFile": "${workspaceFolder}/.env.local",
+            "python": "${command:python.interpreterPath}"
+        },
+        {
+            "name": "Test Environment Variables",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_env.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env.local"
+        }
+    ]
+}

@@ -229,7 +229,7 @@ class GitLabService:
             print("✅ MR approved successfully.")
         except requests.RequestException as e:
             print(f"⚠️ Failed to approve MR: {e}")
-            
+
     def merge_mr(self) -> bool:
         """Merges the merge request."""
         url = f"{self.gitlab_url}/api/v4/projects/{self.project_id}/merge_requests/{self.mr_iid}/merge"
@@ -319,10 +319,11 @@ class GitLabService:
 class GeminiService:
     """Handles all communication with the Gemini API."""
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash", language: str = "en"):
+    def __init__(self, api_key: str, ignore_severity: str = "", model_name: str = "gemini-1.5-flash", language: str = "en"):
         self.model_name = model_name
+        self.ignore_severity = ignore_severity
         self.language = language
-        self.generation_config = {"temperature": 0.3, "top_p": 0.95, "top_k": 40}
+        self.generation_config = {"temperature": 0.3, "top_p": 0.95, "top_k": 40, "response_mime_type": "application/json"}
         try:
             genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel(self.model_name)
@@ -342,7 +343,8 @@ class GeminiService:
             data = self._extract_json_from_text(response.text)
             score = max(0, min(100, int(data.get("score", 0))))
             print(f"✅ Successfully parsed response. Score: {score}")
-            return ReviewResult(approved=bool(data.get("approved", False)), summary=str(data.get("summary", "")), issues=data.get("issues", []), score=score)
+            filtered_issues = [issue for issue in data.get("issues", []) if issue.get("severity") not in self.ignore_severity]
+            return ReviewResult(approved=bool(data.get("approved", False)), summary=str(data.get("summary", "")), issues=filtered_issues, score=score)
         
         except Exception as e:
             print(f"❌ Error during Gemini analysis: {e}")
@@ -352,10 +354,12 @@ class GeminiService:
         """Generates a QA test plan using Gemini."""
         print("📝 Generating QA test plan...")
         prompt = self._build_test_plan_prompt(mr_info, changes_diff, jira_key)
-        
+
         try:
-            response = self.model.generate_content(prompt, generation_config=genai.types.GenerationConfig(**self.generation_config))
-            
+            generation_config = self.generation_config.copy()
+            generation_config.pop('response_mime_type')
+            response = self.model.generate_content(prompt, generation_config=genai.types.GenerationConfig(**generation_config))
+
             if not hasattr(response, 'text') or not response.text:
                 raise ValueError(f"Empty response from Gemini for test plan generation. Feedback: {getattr(response, 'prompt_feedback', 'N/A')}")
             
@@ -385,6 +389,7 @@ class GeminiService:
 * Source Branch: {mr_info.get('source_branch', 'N/A')}
 * File: {file_path}
 * Language: {'Português do Brasil' if self.language == 'pt-BR' else 'English'}
+* **Severities to Ignore:** `{', '.join(self.ignore_severity) if self.ignore_severity else 'N/A'}`
 
 **Code Changes:**
 ```diff
@@ -392,20 +397,31 @@ class GeminiService:
 ```
 
 **Review Guidelines:**
-1. **Code Quality**: Check for code smells, anti-patterns, and potential bugs.
-2. **Security**: Identify any security vulnerabilities or concerns.
-3. **Performance**: Look for potential performance issues.
-4. **Best Practices**: Ensure the code follows language and framework best practices.
-5. **Documentation**: Check if the code is well-documented.
-6. **Tests**: Verify if tests are present and adequate.
+1.  **Code Quality**: Check for code smells, anti-patterns, and potential bugs.
+2.  **Security**: Identify any security vulnerabilities or concerns.
+3.  **Performance**: Look for potential performance issues.
+4.  **Best Practices**: Ensure the code follows language and framework best practices.
+5.  **Documentation**: Check if the code is well-documented.
+6.  **Tests**: Verify if tests are present and adequate.
+
+**Issue Filtering:**
+* You **MUST** follow the `Severities to Ignore` parameter.
+* If a severity level (e.g., `low`, `medium`) is listed in `Severities to Ignore`, you **MUST NOT** include any issues with that severity in your final response.
+* **Example 1:** If `Severities to Ignore` is `"low"`, do not report any issues with `severity: "low"`.
+* **Example 2:** If `Severities to Ignore` is `"low,medium"`, do not report any issues with `severity: "low"` or `severity: "medium"`.
+* If `Severities to Ignore` is empty, report all identified issues.
 
 **Response Format (JSON):**
+Your response must be a valid JSON object, enclosed in a single ```json code block.
+Do not include any text outside of this block.
+```json
 {{
   "score": 0-100,
   "approved": true/false,
   "summary": "{'Breve resumo da revisão' if self.language == 'pt-BR' else 'Brief summary of the review'}",
   "issues": [
     {{
+      "title": "Title for issue",
       "file": "{file_path or 'N/A'}",
       "severity": "low/medium/high",
       "line_number": 123,
@@ -414,6 +430,7 @@ class GeminiService:
     }}
   ]
 }}
+```
 
 **Approval Criteria:**
 - Score >= 75: Approve
@@ -466,22 +483,12 @@ Generate a practical test report in Markdown format. This report should guide ma
 | :-- | :--- | :--- | :--- |
 | CT-01 | Descrever o objetivo do teste. | 1. Faça X.<br>2. Clique em Y. | O sistema deve fazer Z. |
 """
-
     def _extract_json_from_text(self, text: str) -> dict:
-        """Extracts and parses a JSON object from a text response."""
-        match = re.search(r'```(?:json\n)?(.*)```', text, re.DOTALL)
-        if match:
-            text = match.group(1).strip()
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
-            start, end = text.find('{'), text.rfind('}') + 1
-            if 0 <= start < end:
-                try:
-                    return json.loads(text[start:end])
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Could not extract valid JSON from response substring: {e}") from e
-            raise ValueError("Could not find a JSON object in the response.")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Could not extract valid JSON from response substring: {e}")
+
 
 class JiraIntegration:
     """Handles all communication with a Jira instance."""
@@ -504,11 +511,10 @@ class JiraIntegration:
         if 'line' in issue:
             details.append(f"*Line*: {issue['line']}")
         if 'suggestion' in issue:
-            details.append(f"*Suggestion*: {issue['suggestion']}")
+            details.append(f"*Suggestion*: {'{code}'} {issue['suggestion']} {'{code}'}")
         return "\n".join(details)
 
-    def create_review_subtask(self, parent_key: str, summary: str, issues: List[Dict], description: str, score: int, mr_url: str, 
-                            language: str = "en") -> Optional[str]:
+    def create_subtask(self, parent_key: str, summary: str, issues: List[Dict], description: str, score: int, mr_url: str, language: str = "en") -> Optional[str]:
         """Creates a sub-task or task in Jira.
         
         Args:
@@ -589,11 +595,12 @@ class JiraIntegration:
 class ReviewOrchestrator:
     """Orchestrates the end-to-end code review process."""
 
-    def __init__(self, gitlab_service: GitLabService, gemini_service: GeminiService, jira_config: Optional[Dict], language: str):
+    def __init__(self, gitlab_service: GitLabService, gemini_service: GeminiService, jira_config: Optional[Dict], language: str, auto_merge: bool = False):
         self.gitlab_service = gitlab_service
         self.gemini_service = gemini_service
         self.jira_config = jira_config
         self.language = language
+        self.auto_merge = auto_merge
         self.ignore_severity = set(jira_config.get('ignore_severity', set())) if jira_config else set()
         self.jira_integration: Optional[JiraIntegration] = None
         if all(self.jira_config.get(k) for k in ['url', 'user', 'token']):
@@ -627,23 +634,23 @@ class ReviewOrchestrator:
         split_changes = self._split_diffs_by_hunks(changes)
         result = self._analyze_changes(split_changes, mr_info)
 
-        self.gitlab_service.create_mr_note(self._format_review_comment(result))
+        # self.gitlab_service.create_mr_note(self._format_review_comment(result))
 
-        filtered_issues = self._filter_issues_by_severity(result.issues)
-        if filtered_issues:
+        if result.issues:
             mr_details = self._get_mr_details(mr_info)
             if mr_details:
                 line_map = self._build_line_map_from_changes(split_changes)
-                self.gitlab_service.create_mr_discussions(filtered_issues, line_map, mr_details)
+                self.gitlab_service.create_mr_discussions(result.issues, line_map, mr_details)
             else:
                 print("❌ Cannot create discussions without MR details.")
 
         if result.approved:
-            print(f"👍 MR approved automatically (Score: {result.score})")
+            print(f"👍 MR approved automatically (Score: {result.score}")
             self.gitlab_service.approve_mr()
-            # Try to auto-merge the MR
-            if not self.gitlab_service.merge_mr():
-                print("⚠️ Auto-merge failed. Please merge manually.")
+            # Try to auto-merge the MR if enabled
+            if self.auto_merge:
+                if not self.gitlab_service.merge_mr():
+                    print("⚠️ Auto-merge failed. Please merge manually.")
         else:
             print(f"👎 MR requires attention (Score: {result.score})")
 
@@ -676,21 +683,6 @@ class ReviewOrchestrator:
         
         return ReviewResult(approved=approved, summary=summary, issues=issues, score=avg_score)
 
-    def _filter_issues_by_severity(self, issues: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Filter issues based on the ignore_severity configuration."""
-        if not self.ignore_severity:
-            return issues
-            
-        filtered_issues = []
-        for issue in issues:
-            severity = issue.get('severity', '').lower()
-            if severity not in self.ignore_severity:
-                filtered_issues.append(issue)
-            else:
-                print(f"ℹ️ Ignoring issue with severity '{severity}': {issue.get('description', 'No description')}")
-        
-        return filtered_issues
-
     def _handle_jira_integration(self, mr_info: Dict, review_result: ReviewResult, changes: List) -> None:
         """Handles the entire Jira integration process."""
         jira_key = self._extract_jira_key(mr_info.get("title", "") or mr_info.get("description", ""))
@@ -714,7 +706,7 @@ class ReviewOrchestrator:
                 print(f"ℹ️ Creating subtask for {jira_key}")
                 summary = "Code Review"
                 
-            self.jira_integration.create_review_subtask(
+            self.jira_integration.create_subtask(
                 parent_key=target_key,
                 summary=summary,
                 description=review_result.summary,
@@ -724,18 +716,20 @@ class ReviewOrchestrator:
                 language=self.language
             )
 
-            # 2. Filter issues by severity before generating test plan
-            filtered_issues = self._filter_issues_by_severity(review_result.issues)
-            if filtered_issues != review_result.issues:
-                print(f"ℹ️ Filtered {len(review_result.issues) - len(filtered_issues)} issues based on severity filter")
-                review_result.issues = filtered_issues
-
-            # 3. Generate and post the QA test plan (only if there are issues after filtering)
-            if filtered_issues:
+            # 2. Generate and post the QA test plan
+            if review_result.issues:
                 changes_diff = "\n".join([hunk.get("diff", "") for file_changes in changes for hunk in file_changes])
                 test_plan = self.gemini_service.generate_test_plan(mr_info, changes_diff, jira_key)
                 if test_plan:
-                    self.jira_integration.add_comment_to_issue(jira_key, test_plan)
+                    self.jira_integration.create_subtask(
+                        parent_key=target_key,
+                        summary="QA Test Plan",
+                        description=test_plan,
+                        issues=[],
+                        score=0,
+                        mr_url  =mr_info.get('web_url', ''),
+                        language=self.language
+                    )
                 else:
                     print("⚠️ Could not generate test plan, so no comment will be added to Jira.")
 
@@ -877,14 +871,16 @@ def main():
     """Main function to run the reviewer."""
     try:
         print("🚀 Initializing merge request analysis...")
-        
+
         # Parse command line arguments
         import argparse
         parser = argparse.ArgumentParser(description='GitLab Gemini Code Reviewer')
         parser.add_argument('--ignore-severity', type=str, default='',
                           help='Comma-separated list of severities to ignore (e.g., low,medium)')
+        parser.add_argument('--auto-merge', action='store_true',
+                          help='Automatically merge the MR if the review is approved')
         args = parser.parse_args()
-        
+
         # Parse ignore severities
         ignore_severity = parse_ignore_severity(os.getenv("IGNORE_SEVERITY", args.ignore_severity))
         if ignore_severity:
@@ -909,7 +905,8 @@ def main():
                 "user": os.getenv("JIRA_USER"),
                 "token": os.getenv("JIRA_TOKEN"),
             },
-            "ignore_severity": ignore_severity
+            "ignore_severity": ignore_severity,
+            "auto_merge": args.auto_merge
         }
 
         required_vars = ["gitlab_token", "gemini_api_key", "project_id", "mr_iid", "gitlab_url"]
@@ -918,9 +915,15 @@ def main():
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
         gitlab_service = GitLabService(project_id=config["project_id"], mr_iid=config["mr_iid"], gitlab_token=config["gitlab_token"], gitlab_url=config["gitlab_url"])
-        gemini_service = GeminiService(api_key=config["gemini_api_key"], language=language, model_name=gemini_model)
+        gemini_service = GeminiService(api_key=config["gemini_api_key"], ignore_severity=config["ignore_severity"], language=language, model_name=gemini_model)
 
-        orchestrator = ReviewOrchestrator(gitlab_service=gitlab_service, gemini_service=gemini_service, jira_config=config["jira_config"], language=language)
+        orchestrator = ReviewOrchestrator(
+            gitlab_service=gitlab_service,
+            gemini_service=gemini_service,
+            jira_config=config["jira_config"],
+            language=language,
+            auto_merge=config["auto_merge"]
+        )
         orchestrator.run_review()
         sys.exit(0)
     except (ValueError, requests.RequestException, ConnectionError) as e:

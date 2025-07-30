@@ -634,7 +634,7 @@ class ReviewOrchestrator:
         split_changes = self._split_diffs_by_hunks(changes)
         result = self._analyze_changes(split_changes, mr_info)
 
-        # self.gitlab_service.create_mr_note(self._format_review_comment(result))
+        self.gitlab_service.create_mr_note(self._format_review_comment(result))
 
         if result.issues:
             mr_details = self._get_mr_details(mr_info)
@@ -655,10 +655,13 @@ class ReviewOrchestrator:
             print(f"👎 MR requires attention (Score: {result.score})")
 
         self._write_json_report(result, mr_info)
-        
+
         if self.jira_integration:
-            print("🚀 Integrating with Jira...")
-            self._handle_jira_integration(mr_info, result, split_changes)
+            if len(result.issues) > 0:
+                print("🚀 Integrating with Jira...")
+                self._handle_jira_integration(mr_info, result, split_changes)
+            else:
+                print("❌ No issues found to integrate with Jira.")
         else:
             print("❌ Jira integration is disabled.")
 
@@ -705,7 +708,8 @@ class ReviewOrchestrator:
             else:
                 print(f"ℹ️ Creating subtask for {jira_key}")
                 summary = "Code Review"
-                
+
+            # 2. Create the review task/subtask
             self.jira_integration.create_subtask(
                 parent_key=target_key,
                 summary=summary,
@@ -716,22 +720,21 @@ class ReviewOrchestrator:
                 language=self.language
             )
 
-            # 2. Generate and post the QA test plan
-            if review_result.issues:
-                changes_diff = "\n".join([hunk.get("diff", "") for file_changes in changes for hunk in file_changes])
-                test_plan = self.gemini_service.generate_test_plan(mr_info, changes_diff, jira_key)
-                if test_plan:
-                    self.jira_integration.create_subtask(
-                        parent_key=target_key,
-                        summary="QA Test Plan",
-                        description=test_plan,
-                        issues=[],
-                        score=0,
-                        mr_url  =mr_info.get('web_url', ''),
-                        language=self.language
-                    )
-                else:
-                    print("⚠️ Could not generate test plan, so no comment will be added to Jira.")
+            # 3. Generate and post the QA test plan
+            changes_diff = "\n".join([hunk.get("diff", "") for file_changes in changes for hunk in file_changes])
+            test_plan = self.gemini_service.generate_test_plan(mr_info, changes_diff, jira_key)
+            if test_plan:
+                self.jira_integration.create_subtask(
+                    parent_key=target_key,
+                    summary="QA Test Plan",
+                    description=test_plan,
+                    issues=[],
+                    score=0,
+                    mr_url  =mr_info.get('web_url', ''),
+                    language=self.language
+                )
+            else:
+                print("⚠️ Could not generate test plan, so no comment will be added to Jira.")
 
         except Exception as e:
             print(f"⚠️ Failed during Jira integration process: {e}")

@@ -25,6 +25,8 @@ import sys
 import time
 import traceback
 import random
+import subprocess
+import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Set, Tuple
 
@@ -51,7 +53,7 @@ class GitLabService:
         self.project_id = project_id
         self.mr_iid = mr_iid
         self.gitlab_url = gitlab_url
-        self.headers = {"Authorization": f"Bearer {gitlab_token}", "Content-Type": "application/json"}
+        self.headers = {"Private-Token": gitlab_token, "Content-Type": "application/json"}
 
     def get_mr_info(self) -> Dict[str, Any]:
         """Fetches the core details of the merge request."""
@@ -319,7 +321,7 @@ class GitLabService:
 class GeminiService:
     """Handles all communication with the Gemini API."""
 
-    def __init__(self, api_key: str, ignore_severity: str = "", model_name: str = "gemini-1.5-flash", language: str = "en"):
+    def __init__(self, api_key: str, ignore_severity: str = "", model_name: str = "gemini-2.5-flash", language: str = "en"):
         self.model_name = model_name
         self.ignore_severity = ignore_severity
         self.language = language
@@ -870,7 +872,378 @@ def parse_ignore_severity(severity_str: Optional[str]) -> Set[str]:
         return set()
     return set(s.strip().lower() for s in severity_str.split(','))
 
+
+def get_local_changes() -> List[Dict[str, Any]]:
+    """Gets local uncommitted changes from the current git repository."""
+
+    try:
+        # Get git status to see changed files
+        result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"⚠️ Could not get git status: {result.stderr}")
+            return []
+
+        changes = []
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+
+            status = line[:2]
+            file_path = line[3:]
+
+            # Parse git status codes
+            if status[0] in ['M', 'A', 'D']:  # Modified, Added, Deleted
+                change_type = {
+                    'M': 'modified',
+                    'A': 'added',
+                    'D': 'deleted'
+                }.get(status[0])
+                old_path = file_path
+                new_path = file_path
+            elif status[0] == 'R': # Renamed
+                change_type = 'renamed'
+                # For 'R' status, git status --porcelain output is 'R  old_path -> new_path'
+                # We need to split the file_path to get both parts
+                if ' -> ' in file_path:
+                    old_path, new_path = file_path.split(' -> ', 1)
+                else:
+                    # Fallback if format is unexpected
+                    old_path = file_path
+                    new_path = file_path
+            elif status[1] == '?':
+                change_type = 'untracked'
+                old_path = file_path
+                new_path = file_path
+            else:
+                continue
+
+            # Get diff for this file if it's not untracked or deleted
+            diff_content = ""
+            if change_type not in ['untracked', 'deleted']:
+                try:
+                    diff_result = subprocess.run(['git', 'diff', file_path], capture_output=True, text=True)
+                    if diff_result.returncode == 0:
+                        diff_content = diff_result.stdout
+                    else:
+                        # Log specific error if diff fails
+                        print(f"⚠️ Could not get diff for {file_path}: {diff_result.stderr.strip()}")
+                except FileNotFoundError:
+                    print(f"⚠️ Git command not found when getting diff for {file_path}.")
+                except Exception as e:
+                    print(f"⚠️ Error getting diff for {file_path}: {e}")
+
+            changes.append({
+                'file_path': file_path,
+                'change_type': change_type,
+                'diff': diff_content,
+                'new_path': file_path,  # For compatibility with existing code
+                'old_path': file_path
+            })
+
+        return changes
+
+    except FileNotFoundError:
+        print("⚠️ Git is not available. Cannot detect local changes.")
+        return []
+    except Exception as e:
+        print(f"⚠️ Error detecting local changes: {e}")
+        return []
+
+
+def simulate_review_workflow(local_changes: List[Dict[str, Any]], gemini_service: GeminiService, language: str) -> ReviewResult:
+    """Simulates the review workflow for local changes."""
+    print(f"\n🔍 Simulating review for {len(local_changes)} local changes...")
+
+    results = []
+    for change in local_changes:
+        file_path = change['file_path']
+        diff_content = change['diff']
+
+        if not diff_content:
+            print(f"⏭️ Skipping {file_path} (no diff content)")
+            continue
+
+        print(f"🤖 Analyzing {file_path}...")
+
+        # Create a mock MR info for local simulation
+        mock_mr_info = {
+            'title': 'Local Changes Simulation',
+            'description': f'Simulating review for local changes in {file_path}',
+            'source_branch': 'local-changes',
+        }
+
+        # Analyze the code chunk
+        result = gemini_service.analyze_code_chunk(file_path, diff_content, mock_mr_info)
+        results.append(result)
+
+    if not results:
+        return ReviewResult(approved=True, summary="No changes to review.", issues=[], score=100)
+
+    # Aggregate results
+    avg_score = int(sum(r.score for r in results) / len(results))
+    approved = all(r.approved for r in results) and avg_score >= 75
+    summary = "\n\n".join(r.summary for r in results if r.summary)
+    issues = [issue for r in results for issue in r.issues]
+
+    return ReviewResult(approved=approved, summary=summary, issues=issues, score=avg_score)
+
+
+def display_simulation_results(review_result: ReviewResult, local_changes: List[Dict[str, Any]], language: str):
+    """Displays the simulation results in a formatted way."""
+    print(f"\n{'='*60}")
+    print("🎭 SIMULATION RESULTS")
+    print(f"{'='*60}")
+
+    # Summary
+    status_emoji = "✅" if review_result.approved else "❌"
+    score_emoji = "🟢" if review_result.score >= 80 else "🟡" if review_result.score >= 60 else "🔴"
+
+    print(f"## {status_emoji} Review Summary")
+    print(f"**Score**: {score_emoji} {review_result.score}/100")
+    print(f"**Status**: {'APPROVED' if review_result.approved else 'NEEDS ATTENTION'}")
+    print(f"**Files Analyzed**: {len(local_changes)}")
+
+    print(f"\n### Changes Detected:")
+    for change in local_changes:
+        print(f"- `{change['file_path']}` ({change['change_type']})")
+
+    if review_result.summary:
+        print(f"\n### AI Analysis Summary\n{review_result.summary}")
+
+    if review_result.issues:
+        print(f"\n### Issues Found ({len(review_result.issues)})")
+        for i, issue in enumerate(review_result.issues, 1):
+            severity_emoji = "🔴" if issue.get('severity') == 'high' else "🟡" if issue.get('severity') == 'medium' else "🟢"
+            print(f"{i}. {severity_emoji} **{issue.get('title', 'Issue')}**")
+            print(f"   - File: `{issue.get('file', 'N/A')}`")
+            if issue.get('line_number'):
+                print(f"   - Line: {issue.get('line_number')}")
+            print(f"   - Severity: {issue.get('severity', 'unknown')}")
+            print(f"   - Description: {issue.get('description', 'N/A')}")
+            if issue.get('suggestion'):
+                print(f"   - Suggestion: {issue.get('suggestion')}")
+            print()
+    else:
+        print(f"\n### Issues Found: None 🎉")
+        print("No specific issues identified. Great work!")
+
+    print(f"\n{'='*60}")
+    print("📝 WHAT WOULD HAPPEN IN REAL MODE:")
+    print("- A comment would be posted on the GitLab MR")
+    if review_result.issues:
+        print(f"- {len(review_result.issues)} discussion threads would be created")
+    if review_result.approved:
+        print("- The MR would be approved")
+    else:
+        print("- The MR would require attention")
+    print(f"{'='*60}")
+
+
+def generate_development_plan(review_result: ReviewResult, local_changes: List[Dict[str, Any]], language: str, filename: str) -> bool:
+    """Generates a comprehensive development plan markdown file for LLMs."""
+
+    try:
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create the development plan content
+        plan_content = f"""# 📋 Development Plan - Code Review Analysis
+
+**Generated on:** {current_time}
+**Analysis Language:** {language}
+**Files Analyzed:** {len(local_changes)}
+
+---
+
+## 🎯 Executive Summary
+
+### Code Review Results
+- **Overall Score:** {review_result.score}/100
+- **Status:** {'✅ APPROVED' if review_result.approved else '⚠️ NEEDS ATTENTION'}
+- **Issues Found:** {len(review_result.issues)}
+- **Recommendation:** {'Ready for merge' if review_result.approved else 'Requires attention before merge'}
+
+### Key Metrics
+- **Files Changed:** {len(local_changes)}
+- **Risk Level:** {'🟢 Low' if review_result.score >= 80 else '🟡 Medium' if review_result.score >= 60 else '🔴 High'}
+
+---
+
+## 📁 Files Modified
+
+"""
+
+        # Add file changes section
+        for i, change in enumerate(local_changes, 1):
+            plan_content += f"""### {i}. `{change['file_path']}`
+- **Change Type:** {change['change_type'].title()}
+- **Status:** {'📝 Modified' if change['change_type'] == 'modified' else '➕ Added' if change['change_type'] == 'added' else '➖ Deleted' if change['change_type'] == 'deleted' else '❓ Untracked'}
+
+"""
+
+            # Add diff content if available
+            if change.get('diff') and change['change_type'] not in ['untracked', 'deleted']:
+                plan_content += f"""**Code Changes:**
+```diff
+{change['diff'][:1000]}{'...' if len(change['diff']) > 1000 else ''}
+```
+
+"""
+
+        plan_content += """---
+
+## 🔍 Code Review Analysis
+
+"""
+
+        # Add AI analysis summary
+        if review_result.summary:
+            plan_content += f"""### AI Analysis Summary
+
+{review_result.summary}
+
+"""
+
+        # Add issues section
+        if review_result.issues:
+            plan_content += f"""### Issues Identified ({len(review_result.issues)})
+
+"""
+
+            for i, issue in enumerate(review_result.issues, 1):
+                severity_icon = "🔴" if issue.get('severity') == 'high' else "🟡" if issue.get('severity') == 'medium' else "🟢"
+
+                plan_content += f"""#### {i}. {severity_icon} {issue.get('title', 'Issue Title')}
+
+**Details:**
+- **File:** `{issue.get('file', 'N/A')}`
+- **Line:** {issue.get('line_number', 'N/A')}
+- **Severity:** {issue.get('severity', 'unknown').title()}
+- **Category:** {issue.get('category', 'General')}
+
+**Description:**
+{issue.get('description', 'No description provided.')}
+
+"""
+
+                if issue.get('suggestion'):
+                    plan_content += f"""**Suggested Fix:**
+{issue.get('suggestion')}
+
+"""
+
+                # Add code snippet if available
+                if issue.get('code_snippet'):
+                    # Ideally, determine language dynamically, or use 'text' or 'diff'
+                    code_lang = issue.get('code_language', 'python') # Assuming 'code_language' might be provided by AI
+                    plan_content += f"""**Code Snippet:**
+```{code_lang}
+{issue.get('code_snippet')}
+```
+
+"""
+
+                plan_content += """---
+
+"""
+
+        else:
+            plan_content += """### Issues Identified: None 🎉
+
+No specific issues were identified in the code review. The code changes appear to be well-structured and follow best practices.
+
+---
+
+"""
+
+        # Add development recommendations
+        plan_content += """## 🚀 Development Recommendations
+
+### Immediate Actions Required
+
+"""
+
+        if not review_result.approved:
+            plan_content += """- [ ] **Address Critical Issues:** Review and fix all high-severity issues before proceeding
+- [ ] **Code Review:** Schedule a peer code review session
+- [ ] **Testing:** Ensure comprehensive test coverage for modified functionality
+- [ ] **Documentation:** Update any relevant documentation
+
+"""
+
+        plan_content += """### Best Practices Checklist
+
+- [ ] **Code Style:** Follow project's coding standards and style guide
+- [ ] **Documentation:** Update docstrings and comments for new/modified functions
+- [ ] **Testing:** Add unit tests for new functionality
+- [ ] **Performance:** Consider performance implications of changes
+- [ ] **Security:** Review security implications of code changes
+- [ ] **Error Handling:** Ensure proper error handling and logging
+
+### Next Steps
+
+1. **Code Review:** Share this plan with team members for feedback
+2. **Implementation:** Address any identified issues
+3. **Testing:** Run comprehensive test suite
+4. **Deployment:** Plan deployment strategy
+5. **Monitoring:** Set up monitoring for new functionality
+
+---
+
+## 📊 Technical Context
+
+### Development Environment
+- **Language:** Python
+- **Framework:** GitLab CI/CD Integration
+- **AI Service:** Google Gemini
+- **Analysis Mode:** {'Simulation Mode' if filename else 'Live Review'}
+
+### Code Quality Metrics
+- **Score:** {review_result.score}/100
+- **Grade:** {'A' if review_result.score >= 90 else 'B' if review_result.score >= 80 else 'C' if review_result.score >= 70 else 'D' if review_result.score >= 60 else 'F'}
+- **Risk Assessment:** {'Low' if review_result.score >= 80 else 'Medium' if review_result.score >= 60 else 'High'}
+
+---
+
+## 🤖 AI Analysis Context
+
+This development plan was generated using automated code review analysis. The AI analysis focused on:
+
+- **Code Quality:** Syntax, structure, and adherence to best practices
+- **Security:** Potential security vulnerabilities and concerns
+- **Performance:** Performance implications and optimization opportunities
+- **Maintainability:** Code readability and maintainability
+- **Testing:** Test coverage and testing strategy
+- **Documentation:** Documentation completeness and accuracy
+
+### Analysis Methodology
+1. **Static Analysis:** Review of code structure and patterns
+2. **Security Scanning:** Identification of potential security issues
+3. **Best Practices:** Comparison against industry standards
+4. **Risk Assessment:** Evaluation of potential impact and likelihood
+
+---
+
+**Generated by:** GitLab Gemini Reviewer (Simulation Mode)
+**Report Version:** 1.0
+"""
+
+        # Write to file
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(plan_content)
+
+        print(f"✅ Development plan generated: {filename}")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error generating development plan: {e}")
+        return False
+
+
 def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+
     """Main function to run the reviewer."""
     try:
         print("🚀 Initializing merge request analysis...")
@@ -882,7 +1255,73 @@ def main():
                           help='Comma-separated list of severities to ignore (e.g., low,medium)')
         parser.add_argument('--auto-merge', action='store_true',
                           help='Automatically merge the MR if the review is approved')
+        parser.add_argument('--simulate', action='store_true',
+                          help='Run in simulation mode to preview changes without executing actions')
+        parser.add_argument('--generate-plan', type=str, metavar='FILENAME',
+                          help='Generate a development plan markdown file for LLMs (use with --simulate)')
         args = parser.parse_args()
+
+        # Validate arguments
+        if args.generate_plan and not args.simulate:
+            parser.error("--generate-plan can only be used with --simulate mode")
+
+        # Check if simulation mode is requested
+        if args.simulate:
+            print("🎭 Running in SIMULATION MODE")
+            print("This will analyze your local uncommitted changes without making any real changes.")
+
+            # In simulation mode, we only need GEMINI_API_KEY
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_api_key:
+                raise ValueError("GEMINI_API_KEY environment variable is required for simulation mode")
+
+            # Parse ignore severities
+            ignore_severity = parse_ignore_severity(os.getenv("IGNORE_SEVERITY", args.ignore_severity))
+            if ignore_severity:
+                print(f"ℹ️ Ignoring issues with severity: {', '.join(ignore_severity)}")
+
+            language = os.getenv("REVIEW_LANGUAGE", "pt-BR").lower()
+            if language == "pt-br":
+                language = "pt-BR" # Use the desired canonical form
+            elif language not in ["en", "pt-BR"]:
+                language = "en" # Default to English if not supported
+
+            gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+            # Detect local changes
+            local_changes = get_local_changes()
+            if not local_changes:
+                print("✅ No local changes detected to simulate.")
+                sys.exit(0)
+
+            # Initialize Gemini service
+            gemini_service = GeminiService(
+                api_key=gemini_api_key,
+                ignore_severity=ignore_severity,
+                language=language,
+                model_name=gemini_model
+            )
+
+            # Simulate review workflow
+            review_result = simulate_review_workflow(local_changes, gemini_service, language)
+
+            # Display simulation results
+            display_simulation_results(review_result, local_changes, language)
+
+            # Generate development plan if requested
+            if args.generate_plan:
+                print(f"\n📝 Generating development plan: {args.generate_plan}")
+                success = generate_development_plan(review_result, local_changes, language, args.generate_plan)
+                if success:
+                    print("🎉 Development plan generated successfully!")
+                    print(f"📁 File saved as: {args.generate_plan}")
+                else:
+                    print("❌ Failed to generate development plan")
+
+            sys.exit(0)
+
+        # Normal mode - requires all GitLab environment variables
+        print("🔗 Running in NORMAL MODE (GitLab integration)")
 
         # Parse ignore severities
         ignore_severity = parse_ignore_severity(os.getenv("IGNORE_SEVERITY", args.ignore_severity))
@@ -890,12 +1329,12 @@ def main():
             print(f"ℹ️ Ignoring issues with severity: {', '.join(ignore_severity)}")
         
         language = os.getenv("REVIEW_LANGUAGE", "pt-BR").lower()
-        if language not in ["en", "pt-br"]:
-            language = "en"
-        elif language == "pt-br":
-            language = "pt-BR"
+        if language == "pt-br":
+            language = "pt-BR" # Use the desired canonical form
+        elif language not in ["en", "pt-BR"]:
+            language = "en" # Default to English if not supported
 
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
         config = {
             "gitlab_token": os.getenv("GITLAB_TOKEN"),
